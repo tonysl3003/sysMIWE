@@ -98,7 +98,7 @@ async def productos(client: str, background_tasks: BackgroundTasks, request: Req
         start = time.time()
         productos_list = await getProds(creds.get("dbId"))
         elapsed = time.time() - start
-        payload = {"client": client, "provider": provider,
+        payload = {"client": client, "provide": provider,
                    "count": len(productos_list), "elapsed": elapsed,
                    "productos": productos_list}
         background_tasks.add_task(send_whatsapp, client, json.dumps(payload, ensure_ascii=False, default=str))

@@ -13,3 +13,11 @@ nohup: ignoring input
 [2025-04-29 01:50:28 -0600] [1835249] [INFO] Started server process [1835249]
 [2025-04-29 01:50:28 -0600] [1835249] [INFO] Waiting for application startup.
 [2025-04-29 01:50:28 -0600] [1835249] [INFO] Application startup complete.
+[2025-04-29 04:26:47 -0600] [1835140] [INFO] Handling signal: term
+[2025-04-29 04:26:47 -0600] [1835249] [INFO] Shutting down
+[2025-04-29 04:26:47 -0600] [1835249] [INFO] Error while closing socket [Errno 9] Bad file descriptor
+[2025-04-29 04:26:47 -0600] [1835249] [INFO] Waiting for application shutdown.
+[2025-04-29 04:26:47 -0600] [1835249] [INFO] Application shutdown complete.
+[2025-04-29 04:26:47 -0600] [1835249] [INFO] Finished server process [1835249]
+[2025-04-29 04:26:47 -0600] [1835140] [ERROR] Worker (pid:1835249) was sent SIGTERM!
+[2025-04-29 04:26:47 -0600] [1835140] [INFO] Shutting down: Master
