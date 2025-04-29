@@ -1,0 +1,18 @@
+# Core web framework and ASGI server
+fastapi>=0.95.0
+uvicorn[standard]>=0.22.0
+
+# HTTP clients
+httpx>=0.24.1
+requests>=2.31.0
+
+# SOAP client
+zeep>=4.2.0
+
+# Database ORM and async support
+SQLAlchemy>=1.4.0
+python-dotenv>=1.0.0
+asyncpg>=0.27.0  # Asynchronous PostgreSQL driver; replace with aiomysql if using MySQL
+
+# (Optional) for type hints if needed
+# typing-extensions>=4.5.0
