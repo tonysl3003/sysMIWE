@@ -6,7 +6,7 @@ from dbConn import getProds
 from getDataClient import getCredentials, wsp_request_bodega_all_items, getSoapCredentials
 from wooCalls import WooCommerceAPI
 from fastapi.middleware.cors import CORSMiddleware
-from utils.whatsapp_notifier import send_whatsapp
+from utils.whatsapp_notifier import send_whatsapp_error
 
 def log_call(request: Request, client: str):
     prefix = request.url.path.lstrip('/')
@@ -81,73 +81,85 @@ async def healthcheck():
     return {"status": "ok"}
 
 
-
 @app.get("/items/{client}")
 async def productos(client: str, background_tasks: BackgroundTasks, request: Request):
-    """Listar productos para un cliente WooCommerce según proveedor configurado.
-    Provider 'db' usa la BD, otros usan SOAP definido en credentialSoap.json."""
+    """
+    Listar productos para un cliente WooCommerce según proveedor configurado.
+    Provider 'db' usa la BD, otros usan SOAP definido en credentialSoap.json.
+    """
     log_call(request, client)
-    # Obtener configuración del cliente WooCommerce
+
     creds = await getCredentials(client)
     if not creds:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
-    # Determinar proveedor (por defecto 'db')
+
     provider = creds.get("provider", "db")
-    # BD local
-    if provider == "db":
-        start = time.time()
-        productos_list = await getProds(creds.get("dbId"))
-        elapsed = time.time() - start
-        payload = {"client": client, "provide": provider,
-                   "count": len(productos_list), "elapsed": elapsed,
-                   "productos": productos_list}
-        background_tasks.add_task(send_whatsapp, client, json.dumps(payload, ensure_ascii=False, default=str))
-        return payload
-    # SOAP externo: provider debe corresponder a entry en credentialSoap.json
-    soap_creds = await getSoapCredentials(provider)
-    if not soap_creds:
-        raise HTTPException(status_code=404,
-            detail=f"Proveedor SOAP '{provider}' no encontrado")
-    # Usar bid definido en la configuración SOAP
-    bid = soap_creds.get("bid", 0)
+
+    start = time.time()
+
     try:
-        start = time.time()
-        # Llamada SOAP y filtrado de campos
-        resp = await wsp_request_bodega_all_items(
-            siret_url=soap_creds["siretUrl"],
-            ws_pid=soap_creds["ws_pid"],
-            ws_passwd=soap_creds["ws_passwd"],
-            bid=bid
-        )
-        raw = resp.get("data", resp)
-        allowed = [
-            "codigo", "descripcion", "desc_corta", "familia_id", "familia",
-            "marca", "clase", "precio", "stock", "image_url",
-            "itemref_1", "privacidad"
-        ]
-        if isinstance(raw, list):
-            productos_list = [{k: item.get(k) for k in allowed} for item in raw]
-            count = len(productos_list)
-        elif isinstance(raw, dict):
-            productos_list = {k: raw.get(k) for k in allowed}
-            count = 1
+        if provider == "db":
+            # Productos desde Base de Datos
+            productos_list = await getProds(creds.get("dbId"))
+            elapsed = time.time() - start
+            payload = {
+                "client": client,
+                "provider": provider,
+                "count": len(productos_list),
+                "elapsed": elapsed,
+                "productos": productos_list
+            }
+            return payload
+
         else:
-            productos_list = raw
-            count = 0
-        elapsed = time.time() - start
-        payload = {"client": client, "provider": provider, "bid": bid,
-                   "count": count, "elapsed": elapsed,
-                   "productos": productos_list}
-        background_tasks.add_task(send_whatsapp, client, json.dumps(payload, ensure_ascii=False, default=str))
-        return payload
+            # Productos desde SOAP
+            soap_creds = await getSoapCredentials(provider)
+            if not soap_creds:
+                raise HTTPException(status_code=404, detail=f"Proveedor SOAP '{provider}' no encontrado")
+
+            bid = soap_creds.get("bid", 0)
+            resp = await wsp_request_bodega_all_items(
+                siret_url=soap_creds["siretUrl"],
+                ws_pid=soap_creds["ws_pid"],
+                ws_passwd=soap_creds["ws_passwd"],
+                bid=bid
+            )
+            raw = resp.get("data", resp)
+            allowed = [
+                "codigo", "descripcion", "desc_corta", "familia_id", "familia",
+                "marca", "clase", "precio", "stock", "image_url",
+                "itemref_1", "privacidad"
+            ]
+            if isinstance(raw, list):
+                productos_list = [{k: item.get(k) for k in allowed} for item in raw]
+                count = len(productos_list)
+            elif isinstance(raw, dict):
+                productos_list = {k: raw.get(k) for k in allowed}
+                count = 1
+            else:
+                productos_list = raw
+                count = 0
+
+            elapsed = time.time() - start
+            payload = {
+                "client": client,
+                "provider": provider,
+                "bid": bid,
+                "count": count,
+                "elapsed": elapsed,
+                "productos": productos_list
+            }
+            return payload
+
     except Exception as e:
-        msg = str(e) or repr(e)
-        wsdl_url = f"https://{soap_creds['siretUrl']}:443/webservice.php?wsdl"
-        request_info = {"wsdl_url": wsdl_url,
-                        "ws_pid": soap_creds.get("ws_pid"),
-                        "bid": bid}
-        raise HTTPException(status_code=502,
-            detail={"error": msg, "request": request_info})
+        elapsed = time.time() - start
+        error_message = str(e) or repr(e)
+        extra_data = {
+            "provider": provider,
+            "client": client
+        }
+        background_tasks.add_task(send_whatsapp_error, client, elapsed, error_message, extra_data)
+        raise HTTPException(status_code=502, detail={"error": error_message, "provider": provider})
 
 @app.get("/inventory/{client}")
 async def list_wp_products(client: str, background_tasks: BackgroundTasks, request: Request):
@@ -169,9 +181,12 @@ async def list_wp_products(client: str, background_tasks: BackgroundTasks, reque
             "elapsed": elapsed,
             "productos": products
         }
-        background_tasks.add_task(send_whatsapp, client, json.dumps(payload, ensure_ascii=False, default=str))
+        # no WhatsApp notification on successful response
         return payload
     except Exception as e:
+        elapsed = time.time() - start  # si no la tienes aún
+        background_tasks.add_task(send_whatsapp_error, client, elapsed, str(e), {"extra": "informacion util aqui"})
+
         raise HTTPException(status_code=502, detail=str(e) or repr(e))
 
 ### SOAP multi-cliente: consulta bodega
@@ -221,16 +236,19 @@ async def soap_bodega_items(client: str, background_tasks: BackgroundTasks, requ
             "elapsed": elapsed,
             "data": filtered
         }
-        background_tasks.add_task(send_whatsapp, client, json.dumps(payload, ensure_ascii=False, default=str))
+        # no WhatsApp notification on successful response
         return payload
     except Exception as e:
+        # On error, notify via WhatsApp
         msg = str(e) or repr(e)
+        elapsed = time.time() - start
         wsdl_url = f"https://{creds['siretUrl']}:443/webservice.php?wsdl"
         request_info = {
             "wsdl_url": wsdl_url,
             "ws_pid": creds.get("ws_pid"),
             "bid": creds.get("bid", 0)
         }
+        background_tasks.add_task(send_whatsapp_error, client, elapsed, msg, request_info)
         raise HTTPException(
             status_code=502,
             detail={"error": msg, "request": request_info}
@@ -244,6 +262,7 @@ async def sync_remote(client: str, background_tasks: BackgroundTasks, request: R
     return {"message": f"Sincronización iniciada para {client}"}
 
 async def run_sync_remote(client: str):
+    start = time.time()
     creds = await getCredentials(client)
     if not creds:
         return
@@ -302,18 +321,12 @@ async def run_sync_remote(client: str):
         print("Detalle de cambios:")
         for log in changes_log:
             print(log)
-        # Enviar notificación por WhatsApp con detalle de sincronización
-        log_msg = (
-            f"Sincronización completada para {client}: {changes_count} cambios aplicados."
-            f" Detalle: {json.dumps(changes_log, ensure_ascii=False, default=str)}"
-        )
-        await send_whatsapp(client, log_msg)
 
     except Exception as e:
+        elapsed = time.time() - start
+        await send_whatsapp_error(client, elapsed, str(e), {"extra": "informacion util aqui"})
         error_msg = str(e)
         print(f"Error sincronizando {client}: {error_msg}")
-        # Notificar error por WhatsApp
-        await send_whatsapp(client, f"Error sincronizando {client}: {error_msg}")
 
 @app.get("/compare/{client}")
 async def compare_inventories(client: str, background_tasks: BackgroundTasks, request: Request):
@@ -323,6 +336,7 @@ async def compare_inventories(client: str, background_tasks: BackgroundTasks, re
     return {"message": f"Comparación de inventarios iniciada para {client}"}
 
 async def run_compare_inventories(client: str):
+    start = time.time()
     creds = await getCredentials(client)
     if not creds:
         return
@@ -367,18 +381,12 @@ async def run_compare_inventories(client: str):
         print(f"[{client}] Diferencias encontradas: {len(differences)}")
         if differences:
             print(f"[{client}] Detalles de diferencias:\n{json.dumps(differences, indent=2, ensure_ascii=False, default=str)}")
-        # Enviar notificación por WhatsApp con resumen de comparación
-        log_msg = (
-            f"Comparación de inventarios para {client}: {len(differences)} diferencias encontradas."
-            f" Detalle: {json.dumps(differences, ensure_ascii=False, default=str)}"
-        )
-        await send_whatsapp(client, log_msg)
 
     except Exception as e:
+        elapsed = time.time() - start
+        await send_whatsapp_error(client, elapsed, str(e), {"extra": "informacion util aqui"})
         error_msg = str(e)
         print(f"Error comparando inventarios para {client}: {error_msg}")
-        # Notificar error por WhatsApp
-        await send_whatsapp(client, f"Error comparando inventarios para {client}: {error_msg}")
 
 
 @app.get("/missingwp/{client}")
@@ -407,9 +415,12 @@ async def missingwp(client: str, background_tasks: BackgroundTasks, request: Req
             "elapsed": elapsed,
             "missingWp": missing_wp
         }
-        background_tasks.add_task(send_whatsapp, client, json.dumps(payload, ensure_ascii=False, default=str))
+        # no WhatsApp notification on successful response
         return payload
     except Exception as e:
+        elapsed = time.time() - start  # si no la tienes aún
+        background_tasks.add_task(send_whatsapp_error, client, elapsed, str(e), {"extra": "informacion util aqui"})
+
         raise HTTPException(status_code=502, detail=str(e))
 
 @app.post("/missingwp/{client}/create")
@@ -420,6 +431,7 @@ async def create_missing_wp(client: str, background_tasks: BackgroundTasks, requ
     return {"message": f"Creación de productos faltantes iniciada para {client}"}
 
 async def run_create_missing_wp(client: str):
+    start = time.time()
     creds = await getCredentials(client)
     if not creds:
         return
@@ -450,14 +462,9 @@ async def run_create_missing_wp(client: str):
                 errors.append({"sku": prod.get("sku"), "error": str(e)})
 
         print(f"[{client}] Productos creados: {len(created)}, Errores: {len(errors)}")
-        # Enviar notificación por WhatsApp con resultado de creación
-        log_msg = (
-            f"Creación de productos faltantes para {client}: creados={len(created)}, errores={len(errors)}."
-            f" Detalles creados: {json.dumps(created, ensure_ascii=False, default=str)}; Errores: {json.dumps(errors, ensure_ascii=False, default=str)}"
-        )
-        await send_whatsapp(client, log_msg)
+        # no WhatsApp notification on successful response
     except Exception as e:
+        elapsed = time.time() - start
+        await send_whatsapp_error(client, elapsed, str(e), {"extra": "informacion util aqui"})
         error_msg = str(e)
         print(f"Error creando productos faltantes para {client}: {error_msg}")
-        # Notificar error por WhatsApp
-        await send_whatsapp(client, f"Error creando productos faltantes para {client}: {error_msg}")
