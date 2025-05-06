@@ -5878,3 +5878,4 @@
 /venv/pyvenv.cfg
 /compukush.log
 .env
+.idea/workspace.xml
