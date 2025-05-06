@@ -1,4 +1,4 @@
-/venv/bin/activate
+﻿/venv/bin/activate
 /venv/bin/activate.csh
 /venv/bin/activate.fish
 /venv/bin/Activate.ps1
@@ -5877,3 +5877,4 @@
 /venv/lib64/python3.10/site-packages/typing_extensions.py
 /venv/pyvenv.cfg
 /compukush.log
+.env
