@@ -44,18 +44,26 @@ async def fetch_local_products(client: str):
     # Mapear campos SOAP a formato local
     if isinstance(raw, list):
         for it in raw:
+            image_url = it.get("image_url")
+            image_name = image_url.split("/")[-1] if image_url else None
             items.append({
                 "sku": it.get("codigo"),
                 "nombre": it.get("descripcion"),
                 "precio": it.get("precio"),
-                "stock": it.get("stock")
+                "stock": it.get("stock"),
+                "image": image_url,
+                "imageName": image_name
             })
     elif isinstance(raw, dict):
+        image_url = raw.get("image_url")
+        image_name = image_url.split("/")[-1] if image_url else None
         items.append({
             "sku": raw.get("codigo"),
             "nombre": raw.get("descripcion"),
             "precio": raw.get("precio"),
-            "stock": raw.get("stock")
+            "stock": raw.get("stock"),
+            "image": image_url,
+            "imageName": image_name
         })
     return items, provider
 
@@ -275,34 +283,51 @@ async def run_sync_remote(client: str):
         wp_products = await wc.get_all_products()
         local_products, provider = await fetch_local_products(client)
 
-        # Map WooCommerce products by SKU, including the product ID for updates
-        remote_map = {
-            p.get("sku"): {
+        # Map WooCommerce products by SKU, including image info for sync
+        remote_map = {}
+        for p in wp_products:
+            sku = p.get("sku")
+            if not sku:
+                continue
+            imagen = p.get("imagen") or {}
+            remote_map[sku] = {
                 "id": p.get("id"),
-                "sku": p.get("sku"),
+                "sku": sku,
                 "nombre": p.get("nombre") or "",
                 "precio": float(p.get("precio") or 0),
-                "stock": int(p.get("stock") or 0)
+                "stock": int(p.get("stock") or 0),
+                "image": imagen.get("src"),
+                "imageName": imagen.get("name")
             }
-            for p in wp_products if p.get("sku")
-        }
 
-        local_map = {
-            p.get("sku"): {
+        # Map local products by SKU, including image info
+        local_map = {}
+        for p in local_products:
+            sku = p.get("sku")
+            if not sku:
+                continue
+            local_map[sku] = {
                 "nombre": p.get("nombre"),
                 "precio": p.get("precio"),
-                "stock": p.get("stock")
+                "stock": p.get("stock"),
+                "image": p.get("image"),
+                "imageName": p.get("imageName")
             }
-            for p in local_products if p.get("sku")
-        }
 
         shared_skus = set(remote_map) & set(local_map)
         for sku in sorted(shared_skus):
             local = local_map[sku]
             remote = remote_map[sku]
             changes = {}
+            # Sync stock if differs
             if int(local.get("stock") or 0) != int(remote.get("stock") or 0):
                 changes["stock_quantity"] = int(local.get("stock") or 0)
+            # Sync image if name differs
+            local_image_name = local.get("imageName")
+            remote_image_name = remote.get("imageName")
+            if local_image_name != "no image" and local_image_name != remote_image_name:
+                local_image_src = local.get("image")
+                changes["images"] = [{"src": local_image_src, "name": local_image_name}]
 
             if changes:
                 try:
@@ -346,23 +371,35 @@ async def run_compare_inventories(client: str):
         wp_products = await wc.get_all_products()
         local_products, provider = await fetch_local_products(client)
 
-        remote_map = {
-            p.get("sku"): {
+        # Map WooCommerce products by SKU, include ID and image info for comparison or sync
+        remote_map = {}
+        for p in wp_products:
+            sku = p.get("sku")
+            if not sku:
+                continue
+            imagen = p.get("imagen") or {}
+            remote_map[sku] = {
+                "id": p.get("id"),
                 "nombre": p.get("nombre") or "",
                 "precio": float(p.get("precio") or 0),
-                "stock": int(p.get("stock") or 0)
+                "stock": int(p.get("stock") or 0),
+                "image": imagen.get("src"),
+                "imageName": imagen.get("name")
             }
-            for p in wp_products if p.get("sku")
-        }
 
-        local_map = {
-            p.get("sku"): {
+        # Map local products by SKU, include image info for comparison
+        local_map = {}
+        for p in local_products:
+            sku = p.get("sku")
+            if not sku:
+                continue
+            local_map[sku] = {
                 "nombre": p.get("nombre"),
                 "precio": p.get("precio"),
-                "stock": p.get("stock")
+                "stock": p.get("stock"),
+                "image": p.get("image"),
+                "imageName": p.get("imageName")
             }
-            for p in local_products if p.get("sku")
-        }
 
         shared_skus = set(remote_map.keys()) & set(local_map.keys())
         differences = []
@@ -371,8 +408,23 @@ async def run_compare_inventories(client: str):
             local = local_map[sku]
             remote = remote_map[sku]
             field_diffs = {}
-            if int(local.get("stock") or 0) != int(remote.get("stock") or 0):
-                field_diffs["stock"] = {"local": local.get("stock"), "remote": remote.get("stock")}
+            # compare stock
+            local_stock = int(local.get("stock") or 0)
+            remote_stock = int(remote.get("stock") or 0)
+            if local_stock != remote_stock:
+                field_diffs["stock"] = {"local": local_stock, "remote": remote_stock}
+            # compare image names: if mismatch or remote missing, report and insert image
+            local_img = local.get("imageName")
+            remote_img = remote.get("imageName")
+            if local_img != remote_img and local_img != "no image":
+                field_diffs["image"] = {"local": local_img, "remote": remote_img}
+                if local_img:
+                    try:
+                        await wc.update_product(remote["id"], {"images": [{"src": local.get("image"), "name": local_img}]})
+                        print(f"[{client}] Imagen insertada para SKU {sku}: {local_img}")
+                    except Exception as e:
+                        print(f"[{client}] Error insertando imagen para SKU {sku}: {e}")
+            # record if any differences
             if field_diffs:
                 diff = {"sku": sku}
                 diff.update(field_diffs)
