@@ -5879,3 +5879,6 @@
 /compukush.log
 .env
 .idea/workspace.xml
+/.idea
+/__pycache__
+*.log

@@ -2,8 +2,9 @@ import time
 import json
 import datetime
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
-from dbConn import getProds
-from getDataClient import getCredentials, wsp_request_bodega_all_items, getSoapCredentials
+from dbConn import getProds, AsyncSessionLocal
+from getDataClient import getCredentials, wsp_request_bodega_all_items, getSoapCredentials, wsc_request_bodega_all_items
+from sqlalchemy import text
 from wooCalls import WooCommerceAPI
 from fastapi.middleware.cors import CORSMiddleware
 from utils.whatsapp_notifier import send_whatsapp_error
@@ -520,3 +521,129 @@ async def run_create_missing_wp(client: str):
         await send_whatsapp_error(client, elapsed, str(e), {"extra": "informacion util aqui"})
         error_msg = str(e)
         print(f"Error creando productos faltantes para {client}: {error_msg}")
+
+
+@app.post("/updatePriceList")
+async def updatePriceList():
+    """
+    Consulta listas desde configuración fija (en el mismo archivo), realiza SOAP, guarda en DB.
+    """
+    price_lists = [
+        {"siretUrl": "ventas.sicsa.com.ni", "ws_cid": 14062, "ws_passwd": "CODE14062", "proveedor": 1, "priceList": "VIP", "bid": 0},
+        {"siretUrl": "ventas.sicsa.com.ni", "ws_cid": 14085, "ws_passwd": "CODE14085", "proveedor": 1, "priceList": "PLATINUM", "bid": 0},
+        {"siretUrl": "ventas.sicsa.com.ni", "ws_cid": 14057, "ws_passwd": "CODE14057", "proveedor": 1, "priceList": "GOLD", "bid": 0},
+        {"siretUrl": "ventas.sicsa.com.ni", "ws_cid": 13244, "ws_passwd": "CODE13244", "proveedor": 1, "priceList": "PUBLICO", "bid": 0},
+        {"siretUrl": "ventas.sicsa.com.ni", "ws_cid": 13245, "ws_passwd": "CODE13245", "proveedor": 1, "priceList": "DISTRIBUCION", "bid": 0},
+        {"siretUrl": "ventas.sicsa.com.ni", "ws_cid": 12613, "ws_passwd": "CODE12613", "proveedor": 1, "priceList": "OFERTA", "bid": 0},
+        # Puedes agregar más aquí
+    ]
+
+    results = []
+
+    for cfg in price_lists:
+        try:
+            print(f"↪️ Procesando lista: {cfg['priceList']}")
+
+            resp = await wsc_request_bodega_all_items(
+                siret_url=cfg["siretUrl"],
+                ws_cid=cfg["ws_cid"],
+                ws_passwd=cfg["ws_passwd"],
+                bid=cfg.get("bid", 0)
+            )
+
+            print(resp)
+
+            raw = resp.get("data", resp)
+            items = raw if isinstance(raw, list) else []
+
+            print(f"[{cfg['priceList']}] Productos recibidos: {len(items)}")
+
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    # Insert or update price list, ensuring 'descrip' is unique
+                    await session.execute(
+                        text("""
+                            INSERT INTO listaprecio (descrip, prov)
+                            VALUES (:descrip, :prov)
+                            ON DUPLICATE KEY UPDATE prov = VALUES(prov)
+                        """),
+                        {"descrip": cfg["priceList"], "prov": cfg["proveedor"]},
+                    )
+                    # Retrieve the list ID based on unique 'descrip'
+                    res = await session.execute(
+                        text("SELECT id FROM listaprecio WHERE descrip = :descrip"),
+                        {"descrip": cfg["priceList"]},
+                    )
+                    list_id = res.scalar_one()
+
+                    existing_res = await session.execute(
+                        text("SELECT sku, precio FROM preciodetalle WHERE listId = :list_id"),
+                        {"list_id": list_id},
+                    )
+                    existing = {row.sku: row.precio for row in existing_res}
+
+                    to_insert, to_update, unchanged, messages = [], [], 0, []
+
+                    for prod in items:
+                        sku = prod.get("codigo")
+                        price = prod.get("precio")
+
+                        if not sku or price is None:
+                            continue
+                        try:
+                            price = float(price)
+                        except:
+                            continue
+
+                        if sku in existing:
+                            if existing[sku] != price:
+                                to_update.append({"sku": sku, "precio": price})
+                            else:
+                                unchanged += 1
+                        else:
+                            to_insert.append({"sku": sku, "precio": price})
+
+                    for u in to_update:
+                        await session.execute(
+                            text("""
+                                UPDATE preciodetalles SET precio = :precio
+                                WHERE sku = :sku AND listId = :list_id
+                            """),
+                            {"precio": u["precio"], "sku": u["sku"], "list_id": list_id},
+                        )
+                        messages.append(f"Actualizado SKU: {u['sku']}")
+
+                    if to_insert:
+                        insert_params = [
+                            {"sku": i["sku"], "precio": i["precio"], "list_id": list_id}
+                            for i in to_insert
+                        ]
+                        # Insert new price details or update existing without duplicates (sku, listId unique)
+                        await session.execute(
+                            text("""
+                                INSERT INTO preciodetalles (sku, precio, listId)
+                                VALUES (:sku, :precio, :list_id)
+                                ON DUPLICATE KEY UPDATE precio = VALUES(precio)
+                            """),
+                            insert_params,
+                            execution_options={"multi": True},
+                        )
+                        for i in to_insert:
+                            messages.append(f"Insertado o actualizado SKU: {i['sku']}")
+
+            results.append({
+                "priceList": cfg["priceList"],
+                "listId": list_id,
+                "inserted": len(to_insert),
+                "updated": len(to_update),
+                "unchanged": unchanged,
+                "messages": messages[:10]
+            })
+
+        except Exception as e:
+            results.append({
+                "priceList": cfg["priceList"],
+                "error": str(e)
+            })
+
+    return {"results": results}
