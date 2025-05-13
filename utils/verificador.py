@@ -1,10 +1,15 @@
 import httpx
 import json
 import asyncio
+import os
 
 def cargar_clientes():
-    with open("../clientsApi.json", "r") as f:
-        return json.load(f)
+    """Carga lista de clientes desde la variable de entorno CLIENTS_API_JSON."""
+    data = os.getenv("CLIENTS_API_JSON", "[]")
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError:
+        return []
 
 async def verificar_cliente(cliente):
     url = cliente["url"].rstrip("/") + "/wp-json/wc/v3/products"

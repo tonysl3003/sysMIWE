@@ -102,10 +102,10 @@ class WooCommerceAPI:
             resp.raise_for_status()
             return resp.json()
 
-    async def get_or_create_category(self, category_name: str) -> int:
+    async def get_or_create_category(self, category_name: str, parent: int = None) -> int:
         """Obtiene el ID de una categoría por nombre, o la crea si no existe."""
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            # Buscar categorías existentes
+            # Buscar categorías existentes por nombre (puede devolver varias)
             resp = await client.get(
                 f"{self.base_url}/wp-json/wc/v3/products/categories",
                 auth=self.auth,
@@ -115,11 +115,14 @@ class WooCommerceAPI:
             categories = resp.json()
             if categories:
                 return categories[0].get("id")
-            # Crear nueva categoría
+            # Crear nueva categoría, manteniendo jerarquía si parent está dado
+            payload = {"name": category_name}
+            if parent:
+                payload["parent"] = parent
             resp = await client.post(
                 f"{self.base_url}/wp-json/wc/v3/products/categories",
                 auth=self.auth,
-                json={"name": category_name}
+                json=payload
             )
             resp.raise_for_status()
             return resp.json().get("id")
