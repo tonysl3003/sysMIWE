@@ -27,7 +27,7 @@ A micro-service to integrate and synchronize products between a local database o
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/tu_usuario/wooIntegration.git
+   git clone https://github.com/tonysl3003/sysMIWE.git
    cd wooIntegration
    ```
 
